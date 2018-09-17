@@ -867,6 +867,10 @@ extern "C" {
     // calculate mAP
     void validate_detector_map(char *datacfg, char *cfgfile, char *weightfile, float thresh_calc_avg_iou, int quantized);
 
+	detection_with_class* get_actual_detections(detection *dets, int dets_num, float thresh, int* selected_detections_num);
+
+	void validate_detector_recall(char *datacfg, char *cfgfile, char *weightfile, float prob_thresh, int ext_output, int quantized);
+
     // fuse convolutional and batch_norm weights into one convolutional-layer
     void yolov2_fuse_conv_batchnorm(network net);
 

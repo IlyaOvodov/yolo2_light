@@ -1034,7 +1034,7 @@ void yolov2_forward_network_q(network net, network_state state)
             if (i >= 1 && l.activation != LINEAR) forward_convolutional_layer_q(l, state);
             else forward_convolutional_layer_cpu(l, state);
 
-            printf("\n %d - CONVOLUTIONAL \t\t l.size = %d  \n", i, l.size);
+            //printf("\n %d - CONVOLUTIONAL \t\t l.size = %d  \n", i, l.size);
         }
         else if (l.type == MAXPOOL) {
             forward_maxpool_layer_cpu(l, state);
@@ -1101,7 +1101,7 @@ void yolov2_forward_network_q_old(network net, network_state state)
             if (i >= 1 && l.activation != LINEAR) forward_convolutional_layer_q_old(l, state, return_float);
             else forward_convolutional_layer_cpu(l, state);
 
-            printf("\n %d - CONVOLUTIONAL \t\t l.size = %d  \n", i, l.size);
+            //printf("\n %d - CONVOLUTIONAL \t\t l.size = %d  \n", i, l.size);
         }
         else if (l.type == MAXPOOL) {
             forward_maxpool_layer_q(l, state);

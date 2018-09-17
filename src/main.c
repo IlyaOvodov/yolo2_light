@@ -27,13 +27,6 @@
 // get prediction boxes: yolov2_forward_network.c
 void get_region_boxes_cpu(layer l, int w, int h, float thresh, float **probs, box *boxes, int only_objectness, int *map);
 
-typedef struct detection_with_class {
-    detection det;
-    // The most probable class id: the best class index in this->prob.
-    // Is filled temporary when processing results, otherwise not initialized
-    int best_class;
-} detection_with_class;
-
 // Creates array of detections with prob > thresh and fills best_class for them
 detection_with_class* get_actual_detections(detection *dets, int dets_num, float thresh, int* selected_detections_num)
 {
@@ -617,6 +610,7 @@ void run_detector(int argc, char **argv)
     //else if (0 == strcmp(argv[2], "train")) train_detector(datacfg, cfg, weights, gpus, ngpus, clear);
     //else if (0 == strcmp(argv[2], "valid")) validate_detector(datacfg, cfg, weights);
     //else if (0 == strcmp(argv[2], "recall")) validate_detector_recall(datacfg, cfg, weights);
+    else if (0 == strcmp(argv[2], "recall")) validate_detector_recall(obj_names, cfg, weights, thresh, 1 /*ext_output*/, quantized);
     else if (0 == strcmp(argv[2], "map")) validate_detector_map(obj_names, cfg, weights, thresh, quantized);
     else if (0 == strcmp(argv[2], "calibrate")) validate_calibrate_valid(obj_names, cfg, weights, input_calibration);
     else if (0 == strcmp(argv[2], "demo")) {

@@ -3707,6 +3707,51 @@ void find_replace(char *str, char *orig, char *rep, char *output)
     sprintf(output, "%s%s%s", buffer, rep, p + strlen(orig));
 }
 
+void find_replace_extension(char *str, char *orig, char *rep, char *output)
+{
+    char *buffer = calloc(8192, sizeof(char));
+
+    sprintf(buffer, "%s", str);
+    char *p = strstr(buffer, orig);
+    int offset = (p - buffer);
+    int chars_from_end = strlen(buffer) - offset;
+    if (!p || chars_from_end != strlen(orig)) {  // Is 'orig' even in 'str' AND is 'orig' found at the end of 'str'?
+        sprintf(output, "%s", str);
+        free(buffer);
+        return;
+    }
+
+    *p = '\0';
+
+    sprintf(output, "%s%s%s", buffer, rep, p + strlen(orig));
+    free(buffer);
+}
+
+void replace_image_to_label(char *input_path, char *output_path) {
+    //find_replace(input_path, "images", "labels", output_path);    // COCO
+    find_replace(input_path, "images/train2014/", "labels/train2014/", output_path);    // COCO
+    find_replace(output_path, "images/val2014/", "labels/val2014/", output_path);       // COCO
+                                                                                        //find_replace(output_path, "JPEGImages", "labels", output_path);    // PascalVOC
+    find_replace(output_path, "VOC2007/JPEGImages", "VOC2007/labels", output_path);     // PascalVOC
+    find_replace(output_path, "VOC2012/JPEGImages", "VOC2012/labels", output_path);     // PascalVOC
+
+    //find_replace(output_path, "/raw/", "/labels/", output_path);
+
+    // replace only ext of files
+    find_replace_extension(output_path, ".jpg", ".txt", output_path);
+    find_replace_extension(output_path, ".JPG", ".txt", output_path); // error
+    find_replace_extension(output_path, ".jpeg", ".txt", output_path);
+    find_replace_extension(output_path, ".JPEG", ".txt", output_path);
+    find_replace_extension(output_path, ".png", ".txt", output_path);
+    find_replace_extension(output_path, ".PNG", ".txt", output_path);
+    find_replace_extension(output_path, ".bmp", ".txt", output_path);
+    find_replace_extension(output_path, ".BMP", ".txt", output_path);
+    find_replace_extension(output_path, ".ppm", ".txt", output_path);
+    find_replace_extension(output_path, ".PPM", ".txt", output_path);
+}
+
+
+
 void correct_yolo_boxes(detection *dets, int n, int w, int h, int netw, int neth, int relative, int letter)
 {
     int i;
@@ -3958,6 +4003,42 @@ void do_nms_sort_v3(detection *dets, int total, int classes, float thresh)
             for (j = i + 1; j < total; ++j) {
                 box b = dets[j].bbox;
                 if (box_iou(a, b) > thresh) {
+                    dets[j].prob[k] = 0;
+                }
+            }
+        }
+    }
+}
+
+void do_nms_obj(detection *dets, int total, int classes, float thresh)
+{
+    int i, j, k;
+    k = total - 1;
+    for (i = 0; i <= k; ++i) {
+        if (dets[i].objectness == 0) {
+            detection swap = dets[i];
+            dets[i] = dets[k];
+            dets[k] = swap;
+            --k;
+            --i;
+        }
+    }
+    total = k + 1;
+
+    for (i = 0; i < total; ++i) {
+        dets[i].sort_class = -1;
+    }
+
+    qsort(dets, total, sizeof(detection), nms_comparator_v3);
+    for (i = 0; i < total; ++i) {
+        if (dets[i].objectness == 0) continue;
+        box a = dets[i].bbox;
+        for (j = i + 1; j < total; ++j) {
+            if (dets[j].objectness == 0) continue;
+            box b = dets[j].bbox;
+            if (box_iou(a, b) > thresh) {
+                dets[j].objectness = 0;
+                for (k = 0; k < classes; ++k) {
                     dets[j].prob[k] = 0;
                 }
             }
@@ -4423,3 +4504,211 @@ void validate_calibrate_valid(char *datacfg, char *cfgfile, char *weightfile, in
         }
     }
 }
+
+void validate_detector_recall(char *datacfg, char *cfgfile, char *weightfile, float prob_thresh, int ext_output, int quantized)
+{
+    network net = parse_network_cfg(cfgfile, 1, quantized);    // set batch=1
+    if (weightfile) {
+        //load_weights(&net, weightfile);
+        load_weights_upto_cpu(&net, weightfile, net.n);
+    }
+    //set_batch_network(&net, 1);
+    yolov2_fuse_conv_batchnorm(net);
+    calculate_binary_weights(net);
+    if (quantized) {
+        printf("\n\n Quantinization! \n\n");
+        quantinization_and_get_multipliers(net);
+    }
+    srand(time(0));
+    double total_time_nn = 0;
+    double total_time_all = 0;
+
+    //list *plist = get_paths("data/coco_val_5k.list");
+    list *options = read_data_cfg(datacfg);
+    char *valid_images = option_find_str(options, "valid", "data/train.txt");
+    list *plist = get_paths(valid_images);
+    char **paths = (char **)list_to_array(plist);
+
+    layer l = net.layers[net.n - 1];
+
+    int m = plist->size;
+    int i = 0;
+
+    float thresh = .001; // threshold on objectness, while prob_thresh if threshold on prob for object best class
+    float iou_thresh = .5;
+    float nms = .4;
+
+    int total = 0;         // total labels number
+    int correct = 0;       // total labels fit by proposals with IOU > iou_thresh
+    int correct_class = 0; // total labels fit by proposals with IOU > iou_thresh and correct best_class
+    int proposals = 0;               // total proposals with objectness > thresh
+    int proposals_class = 0;         // total proposals with best class defined (prob > prob_thresh)
+    int proposals_correct = 0;       // total proposals fit labels with IOU > iou_thresh
+    int proposals_correct_class = 0; // total proposals fit labels with IOU > iou_thresh and correct best_class
+    float avg_iou = 0;       // sum of IOU by labels fit with best fitting proposal
+    float avg_iou_class = 0; // sum of IOU by labels fit with best fitting proposal with correct class
+    float proposals_avg_iou = 0;       // sum of IOU by proposals fit with best fitting label
+    float proposals_avg_iou_class = 0; // sum of IOU by proposals fit with best fitting label with correct class
+
+    for (i = 0; i < m; ++i) {
+        char *path = paths[i];
+        image orig = load_image(path, 0, 0, net.c);
+        image sized = resize_image(orig, net.w, net.h);
+        clock_t time_start = clock();
+        //char *id = basecfg(path);
+        //network_predict(net, sized.data);
+#ifdef GPU
+        if (quantized) {
+            network_predict_gpu_cudnn_quantized(net, sized.data);    // quantized works only with Yolo v2
+                                                            //nms = 0.2;
+        }
+        else {
+            network_predict_gpu_cudnn(net, sized.data);
+        }
+#else    // GPU
+#ifdef OPENCL
+        network_predict_opencl(net, sized.data);
+#else    // OPENCL
+        if (quantized) {
+            network_predict_quantized(net, sized.data);    // quantized works only with Tiny-models
+                                                  //nms = 0.2;
+        }
+        else {
+            network_predict_cpu(net, sized.data);
+        }
+#endif    // OPENCL
+#endif    // GPU
+        total_time_nn += clock() - time_start;
+
+        int nboxes = 0;
+        int letterbox = 0;
+        //detection *dets = get_network_boxes(&net, sized.w, sized.h, thresh, .5, 0, 1, &nboxes, letterbox);
+        detection *dets = get_network_boxes(&net, 1, 1, thresh, .5, 0, 1, &nboxes, letterbox);
+        if (nms) do_nms_obj(dets, nboxes, 1, nms);
+        int selected_detections_num;
+        detection_with_class* selected_detections = get_actual_detections(dets, nboxes, -1 /*no threshould*/, &selected_detections_num);
+        total_time_all += clock() - time_start;
+
+        char labelpath[4096];
+        replace_image_to_label(path, labelpath);
+
+        int num_labels = 0;
+        box_label *truth = read_boxes(labelpath, &num_labels);
+        int k = 0;
+        for (k = 0; k < selected_detections_num; ++k) {
+            const detection* det_k = &(selected_detections[k].det);
+            int* best_class_k = &(selected_detections[k].best_class);
+            if (det_k->objectness > thresh) {
+                ++proposals;
+                // fill best_class for dets
+                *best_class_k = -1;
+                int j = 0;
+                for (j = 0; j < det_k->classes; ++j) {
+                    if ((det_k->prob[j] > prob_thresh) && (*best_class_k < 0 || det_k->prob[*best_class_k] < det_k->prob[j])) {
+                        *best_class_k = j;
+                    }
+                }
+                if (*best_class_k >= 0)
+                    ++proposals_class;
+
+                float best_iou = 0;
+                float best_iou_class = 0;
+                for (j = 0; j < num_labels; ++j) {
+                    box t = { truth[j].x, truth[j].y, truth[j].w, truth[j].h };
+                    float iou = box_iou(det_k->bbox, t);
+                    if (det_k->objectness > thresh && iou > best_iou) {
+                        best_iou = iou;
+                    }
+                    if (det_k->objectness > thresh && iou > best_iou_class && *best_class_k == truth[j].id) {
+                        best_iou_class = iou;
+                    }
+                }
+                proposals_avg_iou += best_iou;
+                if (best_iou > iou_thresh) {
+                    ++proposals_correct;
+                }
+                proposals_avg_iou_class += best_iou_class;
+                if (best_iou_class > iou_thresh) {
+                    ++proposals_correct_class;
+                }
+
+            }
+        }
+        int j = 0;
+        for (j = 0; j < num_labels; ++j) {
+            ++total;
+            box t = { truth[j].x, truth[j].y, truth[j].w, truth[j].h };
+            float best_iou = 0;
+            float best_iou_class = 0;
+            int k = 0;
+            for (k = 0; k < selected_detections_num; ++k) {
+                const detection* det_k = &(selected_detections[k].det);
+                int* best_class_k = &(selected_detections[k].best_class);
+                float iou = box_iou(det_k->bbox, t);
+                if (det_k->objectness > thresh && iou > best_iou) {
+                    best_iou = iou;
+                }
+                if (det_k->objectness > thresh && iou > best_iou_class && *best_class_k == truth[j].id) {
+                    best_iou_class = iou;
+                }
+            }
+            avg_iou += best_iou;
+            if (best_iou > iou_thresh) {
+                ++correct;
+            }
+            avg_iou_class += best_iou_class;
+            if (best_iou_class > iou_thresh) {
+                ++correct_class;
+            }
+        }
+
+        if (ext_output) {
+            if (i % 1000 == 0)
+                fprintf(stderr, "%6d ", i);
+            if (i == m - 1) {
+                // reprint header
+                fprintf(stderr, "\n");
+                fprintf(stderr, "                               "
+                    "   Labels   Labels(fit class)  "
+                    "Propososals  "
+                    "Propososals(fit class)  "
+                    "Propososals(fit class)/(Propososals with class)"
+                    "\n");
+                fprintf(stderr, "Image Correct  Labels RPs/Img  "
+                    "IOU,%% Recall  IOU,%% Recall   "
+                    "IOU,%% Precision  "
+                    "IOU,%% Precision       "
+                    "IOU,%% Precision"
+                    "\n");
+                fprintf(stderr,
+                    "%5d %7d %7d %7.2f  "
+                    "%5.2f %5.2f   %5.2f %5.2f    "
+                    "%5.2f %5.2f      "
+                    "%5.2f %5.2f           "
+                    "%5.2f %5.2f"
+                    "\n",
+                    i, correct, total, (float)proposals / (i + 1),
+                    avg_iou * 100 / total, 100.*correct / total, avg_iou_class * 100 / total, 100.*correct_class / total,
+                    proposals_avg_iou * 100 / proposals, 100.*proposals_correct / proposals,
+                    proposals_avg_iou_class * 100 / proposals, 100.*correct_class / proposals,
+                    proposals_avg_iou_class * 100 / proposals_class, 100.*correct_class / proposals_class
+                );
+                fprintf(stderr, "Total time (%d samples) %fs (NN:%f, NMS:%f). Per image: %fms (NN:%f, NMS:%f)",
+                    m, total_time_all / CLOCKS_PER_SEC, total_time_nn / CLOCKS_PER_SEC, (total_time_all - total_time_nn) / CLOCKS_PER_SEC,
+                    total_time_all*1000/CLOCKS_PER_SEC/m, total_time_nn * 1000 / CLOCKS_PER_SEC / m, (total_time_all - total_time_nn) * 1000 / CLOCKS_PER_SEC / m
+                );
+            }
+        }
+        else
+        {
+            // old-style output
+            //fprintf(stderr, " %s - %s - ", paths[i], labelpath);
+            fprintf(stderr, "%5d %5d %5d\tRPs/Img: %.2f\tIOU: %.2f%%\tRecall:%.2f%%\n", i, correct, total, (float)proposals / (i + 1), avg_iou * 100 / total, 100.*correct / total);
+        }
+        free(selected_detections);
+        //free(id);
+        free_image(orig);
+        free_image(sized);
+    }
+}
+

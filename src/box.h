@@ -15,6 +15,13 @@ typedef struct detection {
     int sort_class;
 } detection;
 
+typedef struct detection_with_class {
+	detection det;
+	// The most probable class id: the best class index in this->prob.
+	// Is filled temporary when processing results, otherwise not initialized
+	int best_class;
+} detection_with_class;
+
 typedef struct{
     float dx, dy, dw, dh;
 } dbox;
